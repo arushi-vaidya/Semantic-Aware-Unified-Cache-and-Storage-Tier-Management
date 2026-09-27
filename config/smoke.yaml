@@ -1,0 +1,14 @@
+cache:
+  capacity_bytes: 256
+tiers:
+  cache: ./data/smoke/cache
+  ssd: ./data/smoke/ssd
+  hdd: ./data/smoke/hdd
+  archive: ./data/smoke/archive
+metadata:
+  database: ./data/smoke/metadata/storage.db
+policy:
+  ssd_capacity_bytes: 512
+  hdd_capacity_bytes: 1024
+workload:
+  seed: 42

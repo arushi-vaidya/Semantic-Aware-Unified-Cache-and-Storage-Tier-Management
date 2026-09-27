@@ -1,0 +1,14 @@
+cache:
+  capacity_bytes: 10485760
+tiers:
+  cache: ./data/cache
+  ssd: ./data/ssd
+  hdd: ./data/hdd
+  archive: ./data/archive
+metadata:
+  database: ./data/metadata/storage.db
+policy:
+  ssd_capacity_bytes: 104857600
+  hdd_capacity_bytes: 524288000
+workload:
+  seed: 42
