@@ -35,6 +35,29 @@ def main() -> None:
     sub.add_parser("metrics")
     migrate = sub.add_parser("migrate"); migrate.add_argument("--id", required=True); migrate.add_argument("--from", dest="source", required=True); migrate.add_argument("--to", dest="destination", required=True)
     sub.add_parser("reset")
+    dataset = sub.add_parser("build-prediction-dataset")
+    dataset.add_argument("--output", default="results/prediction")
+    dataset.add_argument("--prediction-window", type=int, default=20)
+    dataset.add_argument("--recent-windows", default="10,50,100")
+    dataset.add_argument("--train-fraction", type=float, default=0.7)
+    dataset.add_argument("--validation-fraction", type=float, default=0.15)
+    dataset.add_argument("--workload", default="unspecified")
+    dataset.add_argument("--seed", type=int)
+    train = sub.add_parser("train-access-model")
+    train.add_argument("--input", default="results/prediction")
+    train.add_argument("--model", choices=["logistic", "random-forest"], default="logistic")
+    train.add_argument("--models-dir")
+    evaluate = sub.add_parser("evaluate-access-model")
+    evaluate.add_argument("--input", default="results/prediction")
+    evaluate.add_argument("--models-dir")
+    evaluate.add_argument("--output")
+    predict = sub.add_parser("predict-access")
+    predict.add_argument("--object-id", required=True)
+    predict.add_argument("--model", default="results/prediction/models/logistic_regression.joblib")
+    semantic = sub.add_parser("set-semantic-importance")
+    semantic.add_argument("--object-id", required=True)
+    semantic.add_argument("--score", type=float, required=True)
+    semantic.add_argument("--category")
     args = parser.parse_args()
     config = load_config(args.config)
     if args.command == "reset":
@@ -44,6 +67,41 @@ def main() -> None:
         return
     if args.command == "setup":
         _, _, metadata = build_system(args.config); metadata.close(); print("Storage directories and SQLite metadata initialized"); return
+    if args.command == "build-prediction-dataset":
+        from src.prediction.dataset_builder import build_dataset
+
+        windows = tuple(int(value) for value in args.recent_windows.split(",") if value.strip())
+        dataset = build_dataset(
+            config["metadata"]["database"], args.output, args.prediction_window, windows,
+            args.train_fraction, args.validation_fraction, workload=args.workload, workload_seed=args.seed,
+        )
+        print(json.dumps({"output": args.output, "samples": len(dataset)}, indent=2)); return
+    if args.command == "train-access-model":
+        from src.prediction.trainer import train_model
+
+        model_path = train_model(args.input, args.model, args.models_dir)
+        print(json.dumps({"model": str(model_path)}, indent=2)); return
+    if args.command == "evaluate-access-model":
+        from src.prediction.evaluator import evaluate_models
+
+        report = evaluate_models(args.input, args.models_dir, args.output)
+        print(json.dumps(report, indent=2)); return
+    if args.command in {"predict-access", "set-semantic-importance"}:
+        metadata = MetadataStore(config["metadata"]["database"])
+        try:
+            if args.command == "predict-access":
+                from src.prediction.predictor import predict_object
+
+                probability = predict_object(args.model, metadata, args.object_id)
+                print(json.dumps({"object_id": args.object_id, "access_probability": probability}, indent=2))
+            else:
+                from src.semantic.importance import store_importance
+
+                store_importance(metadata, args.object_id, args.score, args.category)
+                print(json.dumps({"object_id": args.object_id, "semantic_importance": args.score, "category": args.category}, indent=2))
+        finally:
+            metadata.close()
+        return
     cache, storage, metadata = build_system(args.config)
     try:
         if args.command == "put":
