@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAGE · Unified Cache & Storage Tiering</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%23ff7a1a%22/%3E%3Ctext x=%2216%22 y=%2223%22 font-size=%2219%22 font-weight=%22800%22 text-anchor=%22middle%22 fill=%22white%22 font-family=%22Arial%22%3ES%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside class="side">
+  <div class="brand">
+    <div class="logo">S</div>
+    <div><div class="brand-name">SAGE</div><div class="brand-sub">survival-aware tiering</div></div>
+  </div>
+  <nav>
+    <a href="#overview" data-page="overview" class="active"><span>◎</span>Overview</a>
+    <a href="#simulator" data-page="simulator"><span>▶</span>Live simulator</a>
+    <a href="#benchmark" data-page="benchmark"><span>▤</span>Cache benchmark</a>
+    <a href="#tiering" data-page="tiering"><span>≡</span>DRAM→SSD→HDD</a>
+    <a href="#model" data-page="model"><span>✦</span>Model & method</a>
+    <a href="#data" data-page="data"><span>⌸</span>Data & papers</a>
+  </nav>
+  <div class="side-foot">11 real block traces · 2026 baselines<br>S4-FIFO (OSDI'26) · SR-Gadgets</div>
+</aside>
+
+<main>
+  <!-- OVERVIEW -->
+  <section id="page-overview" class="page active">
+    <header class="hero">
+      <div>
+        <div class="eyebrow">One prediction for every tier</div>
+        <h1>SAGE predicts <em>when</em> each block is needed again, then decides DRAM, SSD or HDD.</h1>
+        <p class="lead">A survival model of each block's time-to-next-access drives eviction, admission and tier placement together. Evaluated on 11 production block traces against the newest 2026 eviction policies.</p>
+        <div class="hero-actions">
+          <a class="btn primary" href="#simulator" data-goto="simulator">Run a live simulation →</a>
+          <a class="btn ghost" href="#tiering" data-goto="tiering">See tiering results</a>
+        </div>
+      </div>
+      <div class="hero-art" id="hero-art"></div>
+    </header>
+    <div class="kpis" id="kpis"></div>
+    <div class="grid2">
+      <div class="card"><h3>Mean miss ratio vs cache size</h3><p class="muted">Lower is better · average over 11 traces</p><div id="ov-miss" class="chart"></div></div>
+      <div class="card"><h3>3-tier system: SSD writes per 1K requests</h3><p class="muted">DRAM 1% · SSD 5% · fewer writes = longer SSD life</p><div id="ov-writes" class="chart"></div></div>
+    </div>
+    <div class="card">
+      <h3>How it works</h3>
+      <div class="steps">
+        <div class="step"><b>1 · Features</b><p>30 clues per request from past history only: gaps between accesses, access counts, scan rate.</p></div>
+        <div class="step"><b>2 · Survival model</b><p>LightGBM predicts the chance of reuse in 12 time windows → a full survival curve S(t).</p></div>
+        <div class="step"><b>3 · Conditional score</b><p>P(reuse within H | idle for e). Blocks that don't come back on time lose value automatically.</p></div>
+        <div class="step"><b>4 · One decision</b><p>Same score decides: keep in DRAM, demote to SSD, or leave on HDD (no wasted flash writes).</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SIMULATOR -->
+  <section id="page-simulator" class="page">
+    <div class="page-head"><h2>Live simulator</h2><p class="muted">Replays a real trace through each policy on this machine. Results stream in as each policy finishes.</p></div>
+    <div class="sim">
+      <div class="card controls">
+        <label class="lbl">Trace</label>
+        <select id="sim-trace"></select>
+        <div id="trace-desc" class="muted small"></div>
+        <label class="lbl">Experiment</label>
+        <div class="seg" id="sim-mode">
+          <button data-v="cache" class="on">Single cache</button>
+          <button data-v="tier">DRAM → SSD → HDD</button>
+        </div>
+        <label class="lbl"><span id="size-label">Cache size</span> <span class="muted small">(% of distinct blocks)</span></label>
+        <div class="chips" id="sim-size"></div>
+        <label class="lbl">Requests replayed</label>
+        <div class="seg" id="sim-req">
+          <button data-v="1000000">1M</button>
+          <button data-v="2000000" class="on">2M (paper)</button>
+        </div>
+        <label class="lbl">Policies</label>
+        <div id="sim-pols" class="pols"></div>
+        <button id="sim-run" class="btn primary wide">▶ Run simulation</button>
+        <div id="sim-status" class="muted small"></div>
+      </div>
+      <div class="sim-out">
+        <div class="card"><div class="row-between"><h3 id="sim-chart-title">Hit ratio over time</h3><div style="display:flex;gap:8px"><div class="seg" id="sim-view"><button data-v="cum" class="on">Cumulative</button><button data-v="win">Per window</button></div><button id="sim-replay" class="btn ghost sm" disabled>↻ Replay</button></div></div>
+          <p class="muted small" id="sim-chart-sub">Each point = hit ratio in a window of the measured 80% of the trace</p>
+          <div id="sim-chart" class="chart tall"><div class="empty">Pick a trace and press Run</div></div></div>
+        <div class="grid2">
+          <div class="card"><h3 id="sim-board-title">Leaderboard</h3><div id="sim-board"></div></div>
+          <div class="card"><h3 id="sim-extra-title">Progress</h3><div id="sim-extra"></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- BENCHMARK -->
+  <section id="page-benchmark" class="page">
+    <div class="page-head"><h2>Single-cache benchmark</h2><p class="muted">Miss ratio (lower = better), 44 configurations = 11 traces × 4 sizes. S4-FIFO picks its configuration from the warm-up prefix; "oracle" is the best in hindsight.</p></div>
+    <div class="card"><h3>Mean miss ratio by cache size</h3><div id="bm-table"></div></div>
+    <div class="grid2">
+      <div class="card"><div class="row-between"><h3>Per-trace curves</h3><select id="bm-trace"></select></div><div id="bm-curve" class="chart"></div></div>
+      <div class="card"><div class="row-between"><h3>SAGE vs baseline (% lower miss ratio)</h3><select id="bm-base"></select></div><div id="bm-heat"></div><p class="muted small">Green = SAGE better, red = baseline better.</p></div>
+    </div>
+    <div class="card"><h3>Ablations: what matters</h3><div id="bm-abl" class="chart"></div></div>
+  </section>
+
+  <!-- TIERING -->
+  <section id="page-tiering" class="page">
+    <div class="page-head"><h2>DRAM → SSD → HDD tiering</h2><p class="muted">Latency model: DRAM 0.1 µs, SSD 100 µs, HDD 5 ms. Baselines run their policy in DRAM and demote every victim into an LRU SSD tier.</p></div>
+    <div class="row-between"><div class="seg" id="tier-pair"></div><div class="muted small" id="tier-sum"></div></div>
+    <div class="grid2">
+      <div class="card"><h3>Mean access latency (ms)</h3><div id="tier-lat" class="chart"></div></div>
+      <div class="card"><h3>SSD writes per 1K requests</h3><div id="tier-wr" class="chart"></div></div>
+    </div>
+    <div class="card"><h3>Per trace: SAGE-Unified vs best baseline for that trace</h3><div id="tier-per" class="chart"></div></div>
+    <div class="card"><h3>Where requests are served</h3><div id="tier-stack" class="chart"></div></div>
+  </section>
+
+  <!-- MODEL -->
+  <section id="page-model" class="page">
+    <div class="page-head"><h2>Model & method</h2></div>
+    <div class="card"><div id="pipeline"></div></div>
+    <div class="grid2">
+      <div class="card"><h3>What the model looks at</h3><p class="muted small">Share of LightGBM gain, averaged over traces</p><div id="imp" class="chart"></div></div>
+      <div class="card"><h3>Parameters</h3><table class="kv" id="params"></table></div>
+    </div>
+    <div class="card"><h3>The scoring rule</h3>
+      <div class="formula">p<sub>T</sub>(x) = P(reuse within H<sub>T</sub> | idle for e) = 1 − S<sub>x</sub>(e + H<sub>T</sub>) / S<sub>x</sub>(e)</div>
+      <p class="muted">S<sub>x</sub> is the predicted survival curve; e is how long the block has been idle; H<sub>T</sub> is the tier's turnover time (capacity ÷ insertion rate × 0.5). Evict the lowest score among 64 sampled blocks; admit a new block only if it beats the victim; demote a DRAM victim to SSD only if it beats the SSD victim.</p>
+    </div>
+  </section>
+
+  <!-- DATA -->
+  <section id="page-data" class="page">
+    <div class="page-head"><h2>Datasets & base papers</h2></div>
+    <div class="card"><h3>Traces</h3><p class="muted small">Public libCacheSim oracleGeneral traces from CMU PDL. First 2M requests used; 20% warm-up; metrics on the remaining 80%.</p><div id="traces"></div></div>
+    <div class="grid2" id="papers"></div>
+  </section>
+</main>
+<div id="tip" class="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -12,3 +12,41 @@ policy:
   hdd_capacity_bytes: 524288000
 workload:
   seed: 42
+decision:
+  enabled: true
+  policy: unified
+  interval_operations: 20
+  weights:
+    access: 0.35
+    semantic: 0.25
+    latency: 0.20
+    migration: 0.10
+    resource: 0.10
+  hysteresis_threshold: 0.05
+  minimum_decision_margin: 0.05
+  min_residency_operations: 40
+  migration_cooldown_operations: 40
+  migration_reference_bytes: 1000000
+  independent_tiering:
+    hot_access_count: 10
+    hot_age_operations: 20
+    warm_access_count: 3
+    archive_age_operations: 500
+    recent_window_operations: 50
+  tiers:
+    cache:
+      latency_weight: 1.0
+      relative_cost: 0.4
+      migration_cost: 1.0
+    ssd:
+      latency_weight: 0.75
+      relative_cost: 0.3
+      migration_cost: 1.0
+    hdd:
+      latency_weight: 0.4
+      relative_cost: 0.15
+      migration_cost: 1.0
+    archive:
+      latency_weight: 0.1
+      relative_cost: 0.05
+      migration_cost: 1.0

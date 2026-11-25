@@ -58,6 +58,18 @@ class MetadataStore:
             CREATE INDEX IF NOT EXISTS idx_access_object ON access_log(object_id);
             CREATE INDEX IF NOT EXISTS idx_access_time ON access_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_migration_object ON migration_log(object_id);
+            CREATE TABLE IF NOT EXISTS decision_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, object_id TEXT NOT NULL,
+                current_tier TEXT NOT NULL, selected_tier TEXT NOT NULL, access_probability REAL,
+                semantic_importance REAL, utilities_json TEXT NOT NULL, contributions_json TEXT NOT NULL,
+                migration_required INTEGER NOT NULL, migration_reason TEXT NOT NULL, decision_margin REAL NOT NULL,
+                operation_index INTEGER NOT NULL, FOREIGN KEY(object_id) REFERENCES objects(object_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_decision_object ON decision_log(object_id);
+            CREATE TABLE IF NOT EXISTS placement_state (
+                object_id TEXT PRIMARY KEY, tier_since_operation INTEGER NOT NULL,
+                last_migration_operation INTEGER NOT NULL, FOREIGN KEY(object_id) REFERENCES objects(object_id) ON DELETE CASCADE
+            );
             """
         )
         access_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(access_log)")}
@@ -123,9 +135,12 @@ class MetadataStore:
         ).fetchone()
         return None if row is None else (float(row["score"]), row["category"])
 
-    def update_tier(self, object_id: str, tier: str) -> None:
+    def update_tier(self, object_id: str, tier: str, file_path: str | None = None) -> None:
         current = self.get_object(object_id).current_tier
-        self.connection.execute("UPDATE objects SET previous_tier = ?, current_tier = ?, migration_count = migration_count + 1 WHERE object_id = ?", (current, tier, object_id))
+        if file_path is None:
+            self.connection.execute("UPDATE objects SET previous_tier = ?, current_tier = ?, migration_count = migration_count + 1 WHERE object_id = ?", (current, tier, object_id))
+        else:
+            self.connection.execute("UPDATE objects SET previous_tier = ?, current_tier = ?, file_path = ?, migration_count = migration_count + 1 WHERE object_id = ?", (current, tier, file_path, object_id))
         self.connection.commit()
 
     def update_size(self, object_id: str, size_bytes: int) -> None:
@@ -138,6 +153,51 @@ class MetadataStore:
             (object_id, source, destination, utc_now(), bytes_moved, duration_ms, int(success), error),
         )
         self.connection.commit()
+
+    def log_decision(
+        self,
+        object_id: str,
+        current_tier: str,
+        selected_tier: str,
+        access_probability: float | None,
+        semantic_importance: float | None,
+        utilities: dict[str, float | None],
+        contributions: dict[str, dict[str, float] | None],
+        migration_required: bool,
+        migration_reason: str,
+        decision_margin: float,
+        operation_index: int,
+    ) -> None:
+        import json
+
+        self.connection.execute(
+            "INSERT INTO decision_log(timestamp, object_id, current_tier, selected_tier, access_probability, "
+            "semantic_importance, utilities_json, contributions_json, migration_required, migration_reason, "
+            "decision_margin, operation_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (utc_now(), object_id, current_tier, selected_tier, access_probability, semantic_importance,
+             json.dumps(utilities, sort_keys=True), json.dumps(contributions, sort_keys=True),
+             int(migration_required), migration_reason, decision_margin, operation_index),
+        )
+        self.connection.commit()
+
+    def decision_history(self, object_id: str | None = None, limit: int = 100) -> list[dict]:
+        import json
+
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if object_id is None:
+            rows = self.connection.execute("SELECT * FROM decision_log ORDER BY id DESC LIMIT ?", (limit,))
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM decision_log WHERE object_id = ? ORDER BY id DESC LIMIT ?", (object_id, limit)
+            )
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["utilities"] = json.loads(item.pop("utilities_json"))
+            item["contributions"] = json.loads(item.pop("contributions_json"))
+            result.append(item)
+        return result
 
     def all_objects(self) -> list[ObjectMetadata]:
         return [ObjectMetadata(**dict(row)) for row in self.connection.execute("SELECT * FROM objects ORDER BY object_id")]

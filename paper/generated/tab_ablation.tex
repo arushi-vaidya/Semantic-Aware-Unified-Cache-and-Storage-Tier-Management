@@ -1,0 +1,11 @@
+\begin{tabular}{llrrr}
+\toprule
+Variant & Change & Mean MR & $\Delta$ (pp) & Worse \\
+\midrule
+SAGE & full model & 0.5768 & +0.00 & 0/44 \\
+SAGE-noCond & no idle-time conditioning & 0.6017 & +2.48 & 41/44 \\
+SAGE-noAdmit & no admission control & 0.5853 & +0.85 & 24/44 \\
+SAGE-objOnly & object features only & 0.5750 & -0.18 & 25/44 \\
+SAGE-H & + regret hedge (post hoc) & 0.5768 & -0.01 & 24/44 \\
+\bottomrule
+\end{tabular}

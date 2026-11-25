@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from src.cache.lru_cache import LRUCache
@@ -58,8 +59,42 @@ def main() -> None:
     semantic.add_argument("--object-id", required=True)
     semantic.add_argument("--score", type=float, required=True)
     semantic.add_argument("--category")
+    adaptive = sub.add_parser("run-adaptive-workload")
+    adaptive.add_argument("--type", choices=["sequential", "uniform", "hot", "mixed"], required=True)
+    adaptive.add_argument("--operations", type=int)
+    adaptive.add_argument("--seed", type=int, default=42)
+    adaptive.add_argument("--objects", type=int, default=20)
+    adaptive.add_argument("--size", type=int, default=1024)
+    adaptive.add_argument("--read-ratio", type=float, default=0.8)
+    adaptive.add_argument("--model", default="results/prediction/models/logistic_regression.joblib")
+    adaptive.add_argument("--output")
+    adaptive.add_argument("--decision-interval", type=int)
+    adaptive.add_argument("--trace", help="Replay a saved JSON operation trace instead of generating one")
+    explain = sub.add_parser("explain-decision")
+    explain.add_argument("--object-id", required=True)
+    explain.add_argument("--run-dir")
+    sub.add_parser("placement-status")
+    sub.choices["placement-status"].add_argument("--run-dir")
+    history = sub.add_parser("decision-history")
+    history.add_argument("--object-id")
+    history.add_argument("--limit", type=int, default=100)
+    history.add_argument("--run-dir")
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.command == "run-adaptive-workload":
+        from src.decision.placement import run_isolated_adaptive_workload
+
+        if args.operations is None and args.trace is None:
+            parser.error("run-adaptive-workload requires --operations or --trace")
+        output_dir = args.output or str(
+            Path("results/decision") / datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")
+        )
+        result = run_isolated_adaptive_workload(
+            args.config, args.model, output_dir, args.type, args.operations or 0, args.seed,
+            args.objects, args.size, args.read_ratio, args.decision_interval, args.trace,
+        )
+        print(json.dumps(result, indent=2))
+        return
     if args.command == "reset":
         for path in config["tiers"].values(): shutil.rmtree(path, ignore_errors=True)
         database = Path(config["metadata"]["database"]); database.unlink(missing_ok=True)
@@ -99,6 +134,49 @@ def main() -> None:
 
                 store_importance(metadata, args.object_id, args.score, args.category)
                 print(json.dumps({"object_id": args.object_id, "semantic_importance": args.score, "category": args.category}, indent=2))
+        finally:
+            metadata.close()
+        return
+    if args.command in {"explain-decision", "decision-history", "placement-status"}:
+        if args.run_dir:
+            run_root = Path(args.run_dir).resolve()
+            database_path = run_root / "metadata.sqlite"
+            tier_paths = {tier.value.lower(): run_root / "tiers" / tier.value.lower() for tier in Tier}
+        else:
+            database_path = Path(config["metadata"]["database"])
+            tier_paths = config["tiers"]
+        metadata = MetadataStore(database_path)
+        storage = StorageManager(tier_paths, metadata)
+        try:
+            if args.command == "explain-decision":
+                history_rows = metadata.decision_history(args.object_id, 1)
+                if not history_rows:
+                    raise KeyError(f"No recorded decision for {args.object_id}")
+                row = history_rows[0]
+                print(json.dumps({
+                    "object_id": args.object_id,
+                    "current_tier": row["current_tier"],
+                    "selected_tier": row["selected_tier"],
+                    "access_probability": row["access_probability"],
+                    "semantic_importance": row["semantic_importance"],
+                    "utilities": row["utilities"],
+                    "contributions": row["contributions"],
+                    "decision_margin": row["decision_margin"],
+                    "migration_required": bool(row["migration_required"]),
+                    "reason": row["migration_reason"],
+                }, indent=2))
+            elif args.command == "decision-history":
+                print(json.dumps(metadata.decision_history(args.object_id, args.limit), indent=2))
+            else:
+                placement = {}
+                for tier in Tier:
+                    object_ids = storage.list_objects(tier)
+                    placement[tier.value] = {
+                        "objects": object_ids,
+                        "count": len(object_ids),
+                        "bytes": sum(storage.path(object_id, tier).stat().st_size for object_id in object_ids),
+                    }
+                print(json.dumps(placement, indent=2))
         finally:
             metadata.close()
         return

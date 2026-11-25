@@ -35,10 +35,13 @@ class StorageManager:
         return self.paths[tier] / object_id
 
     def put(self, object_id: str, data: bytes) -> None:
+        self.put_at_tier(object_id, data, Tier.CACHE)
+
+    def put_at_tier(self, object_id: str, data: bytes, tier: Tier) -> None:
         self._validate_id(object_id)
         if self.exists(object_id):
             raise FileExistsError(f"Object already exists: {object_id}")
-        destination = self.path(object_id, Tier.CACHE)
+        destination = self.path(object_id, tier)
         fd, temporary = tempfile.mkstemp(prefix=f".{object_id}.", dir=destination.parent)
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -46,7 +49,7 @@ class StorageManager:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
-            self.metadata.create_object(object_id, str(destination), len(data), Tier.CACHE)
+            self.metadata.create_object(object_id, str(destination), len(data), tier.value)
         except Exception:
             Path(temporary).unlink(missing_ok=True)
             raise
@@ -121,7 +124,7 @@ class StorageManager:
             if destination.stat().st_size != bytes_moved or self._sha256(source) != self._sha256(destination):
                 raise StorageError("Migration integrity verification failed")
             source.unlink()
-            self.metadata.update_tier(object_id, destination_tier)
+            self.metadata.update_tier(object_id, destination_tier.value, str(destination))
             self.metadata.log_migration(object_id, source_tier, destination_tier, bytes_moved, (time.monotonic() - started) * 1000, True)
         except Exception as exc:
             if temporary_path is not None:

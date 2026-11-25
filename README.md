@@ -92,6 +92,47 @@ python -m src.cli set-semantic-importance --object-id object_001 --score 1.0 --c
 
 The category defaults in `src/semantic/importance.py` are configurable by the caller. There is no LLM, embedding, or automatic semantic classification in Phase 2.
 
+## Phase 3: Unified placement
+
+Phase 3 adds an online decision engine while leaving the Phase 1 LRU cache and Phase 2 prediction interfaces intact. The unified runner uses `StorageManager` and its filesystem tiers, the existing SQLite access/semantic metadata, `predict_object` from Phase 2, and the existing copy, fsync, size, and SHA-256 verification in `StorageManager.move`. Adaptive runs use isolated directories under `results/decision`; they do not reset or overwrite the configured Phase 1 data.
+
+At each configured interval, the runner predicts each object's probability of access using the selected, trained Phase 2 model, reads semantic importance from the persistent metadata, snapshots actual filesystem use, scores all feasible tiers, persists the decision, then performs any eligible migration. Reads and writes are actual filesystem operations and are recorded in the run-local SQLite database. An unassigned semantic score is represented as 0.0; no score is inferred or fabricated. The isolated runner copies a score only when the source SQLite database already contains one for the same object ID.
+
+For object $x$ and candidate tier $T$, the implemented utility is:
+
+$$
+U(T\mid x)=\alpha P_x L_T+\beta S_x L_T+\gamma L_T-\delta M_{x,T}-\epsilon C_{x,T}
+$$
+
+Here $P_x$ is the Phase 2 `predict_proba` probability, $S_x$ is the separately persisted semantic score, and $L_T$ is the configured normalized latency benefit (not a hardware latency measurement). For a move, $M_{x,T}=\min(1,\mathrm{size}_x/\mathrm{migration\_reference\_bytes})\times(\mathrm{source\_migration\_cost}+\mathrm{destination\_migration\_cost})/2$; it is zero when the candidate is the current tier. Resource cost is $C_{x,T}=(\mathrm{relative\_cost}_T+\mathrm{projected\_utilization}_T)/2$. The five weights, normalized tier properties, and migration reference size are configurable experimental parameters, not tuned or claimed optimal values.
+
+Capacity is derived from actual object files and the configured per-tier byte limits. A candidate that cannot fit is rejected; an object in an already-overfull tier can be moved out even if ordinary hysteresis would retain it. Before applying a move, the migration controller verifies metadata and source/destination paths and prevents duplicate in-flight moves. `StorageManager.move` copies to a temporary file, fsyncs, verifies byte count and SHA-256, and updates metadata only after the source is safely verified. Failures are logged and raised.
+
+Unified policy migrations are gated by both a score hysteresis threshold and a minimum decision margin. Minimum residency and migration cooldown are operation-count limits persisted per object in SQLite. The configurable interval avoids reevaluating on every access. Decisions record probabilities, semantic values, all tier utilities and score contributions, feasibility, the selected tier, margin, and reason. `explain-decision` returns the latest persisted explanation. The deterministic `independent-tiering` policy is selectable through `decision.policy`; it uses only recent access frequency and age thresholds and records prediction/semantic values as null. `decision.policy: lru` runs the existing Phase 1 LRU cache in the isolated experiment harness. ARC is not present in this repository and is not added here.
+
+Initial parameters are in `config/config.yaml`. Tier latency weights and relative costs are normalized policy inputs, not measured device characteristics. The values should be tuned only through a future controlled evaluation; Phase 3 makes no performance-improvement claim.
+
+Train Phase 2 from real access logs before running the unified policy:
+
+```bash
+python3.11 -m src.cli build-prediction-dataset --workload unspecified
+python3.11 -m src.cli train-access-model --model logistic
+```
+
+Run one isolated adaptive trace (the same command also works for `uniform` and `hot`):
+
+```bash
+python3.11 -m src.cli run-adaptive-workload --type sequential --operations 5000 --objects 200 --size 65536 --seed 42
+python3.11 -m src.cli run-adaptive-workload --type uniform --operations 5000 --objects 200 --size 65536 --seed 42
+python3.11 -m src.cli run-adaptive-workload --type hot --operations 5000 --objects 200 --size 65536 --seed 42
+```
+
+Each run writes `decisions.csv`, `migrations.csv`, `placement_history.csv`, `workload.json`, `decision_metrics.json`, and `experiment_metadata.json`, alongside its isolated `metadata.sqlite` and tier directories. Outputs are measured from that run's real state. The metadata includes workload seed, selected policy, model path and SHA-256 when applicable, effective parameters, and timing. Set `decision.policy` to `independent-tiering` or `lru` in a copied config to run either baseline without a model. `scripts/evaluate_placement.py <run-dir>` audits actual files against SQLite. `scripts/compare_policies.py <run-dir> ...` tabulates measured metrics without interpreting them as evidence of improvement.
+
+To replay a saved Phase 1 operation trace instead of generating a new one, pass `--trace path/to/workload.json`; the replayed trace is copied into the run output as `workload.json`. Inspect that isolated run with `python3.11 -m src.cli explain-decision --run-dir results/decision/<run> --object-id object_0001`, `decision-history --run-dir ...`, and `placement-status --run-dir ...`.
+
+Current limitations: the tiers are filesystem paths and may not correspond to physically distinct devices; latency-benefit and relative-cost values are configurable assumptions; semantic scores must be assigned externally and the current legacy database may not contain any; archive capacity is unlimited unless configured; decisions are evaluated at intervals, not after every operation. Phase 4 remains responsible for controlled baseline comparisons, repeated trials, statistical analysis, and any performance claims. Phase 3 supplies reproducible traces, decisions, migrations, placement snapshots, access latency/cache counts, prediction/decision/migration timing, and capacity/thrashing diagnostics for that work.
+
 ## Tests and reproducibility
 
 ```bash
@@ -102,4 +143,28 @@ Tests use temporary directories. Workloads use `random.Random(seed)`, so the sam
 
 ## Limitations and Phase boundary
 
-The local implementation uses configurable filesystem paths, not guaranteed physically distinct media. Separate SSD/HDD devices are required for physical-device benchmarking. Prediction quality depends on workload size and diversity; a small or single-class chronological split cannot support all metrics or model fitting. The prediction output is not evidence of improved storage performance and does not affect cache contents or tier placement. Using access probabilities or semantic importance to make placement decisions is reserved for Phase 3.
+The local implementation uses configurable filesystem paths, not guaranteed physically distinct media. Separate SSD/HDD devices are required for physical-device benchmarking. Prediction quality depends on workload size and diversity; a small or single-class chronological split cannot support all metrics or model fitting. Phase 3 uses predictions and semantic metadata for placement, but those inputs and the utility weights require controlled evaluation before drawing performance conclusions.
+## Phase 4: SAGE — learned eviction and unified tiering on real traces
+
+`src/sim/` is a fast trace-driven simulator (unit-size blocks) used for the controlled evaluation the
+earlier phases deferred. It replays real block-I/O traces against published policies and SAGE
+(Survival-Aware, Group-context Eviction). Full numbers: `results/benchmark/REPORT.md`.
+
+* Data: 13 public traces in libCacheSim `oracleGeneral` format from
+  `https://ftp.pdl.cmu.edu/pub/datasets/twemcacheWorkload/cacheDatasets/` (MSR Cambridge, FIU,
+  CloudPhysics). Dev (hyper-parameter tuning only): `msr_proj_0`, `fiu_webresearch`. Test: 11 others.
+* Protocol: first 2M requests per trace, 20% warm-up, miss ratio on the remaining 80%; cache sizes
+  0.5/1/5/10% of distinct blocks; SAGE models are trained only on requests before the window they serve.
+* Baselines: S4-FIFO (OSDI'26), SR-Gadgets/SR-S3-FIFO (2026), SIEVE (NSDI'24), S3-FIFO (SOSP'23),
+  LRB (NSDI'20, partial), LeCaR (HotStorage'18), ARC (FAST'03), LRU, Belady (bound).
+
+```bash
+python3.11 -m pip install -r requirements.txt
+# download + decompress traces into data/traces/bin/<name>.bin (zstd -d)
+python3.11 scripts/bench_cache.py --stage model --threads 7                # SAGE hazard models (once per trace)
+python3.11 scripts/bench_cache.py --stage sim --workers 7                  # all policies x sizes
+python3.11 scripts/bench_cache.py --stage sim --policies S4-FIFO SR-S3-FIFO SIEVE --out results/benchmark/raw_results_2026.csv
+python3.11 scripts/tune_s4fifo.py                                          # S4-FIFO config chosen from warm-up prefix
+python3.11 scripts/bench_tiers.py                                          # DRAM -> SSD -> HDD experiment
+python3.11 scripts/make_report.py                                          # tables, Wilcoxon tests, plots
+```
